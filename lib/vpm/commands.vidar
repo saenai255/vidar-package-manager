@@ -1,0 +1,196 @@
+package vpm
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "../errs"
+import "../semver"
+import "../sh"
+
+init_project :: proc(name: string) -> errs.Error {
+	cwd := os.get_working_directory(context.allocator) catch e { return errs.from_os(e, "working directory") }
+	if os.exists(join(cwd, MANIFEST_FILE)) do return errs.fail("%s already exists", MANIFEST_FILE)
+
+	m := Manifest{
+		name    = name if name != "" else os.base(cwd),
+		version = "0.1.0",
+	}
+	m.scripts["build"] = "vidar build ."
+	m.scripts["run"] = "vidar run ."
+	m.scripts["test"] = "vidar test ."
+	m.dependencies = make(map[string]string)
+	write_manifest(join(cwd, MANIFEST_FILE), m) or_return
+	ignore_modules(cwd) or_return
+	fmt.printfln("created %s for %s", MANIFEST_FILE, m.name)
+	return nil
+}
+
+@(private)
+ignore_modules :: proc(root: string) -> errs.Error {
+	path := join(root, ".gitignore")
+	existing, _ := os.read_entire_file(path, context.temp_allocator)
+	text := string(existing)
+	for line in strings.split_lines(text, context.temp_allocator) {
+		if strings.trim_space(line) == MODULES_DIR + "/" do return nil
+	}
+	sep := "\n" if len(text) > 0 && !strings.has_suffix(text, "\n") else ""
+	updated := strings.concatenate({text, sep, MODULES_DIR, "/\n"}, context.temp_allocator)
+	os.write_entire_file(path, updated) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// `vpm get module[@spec]`, Go style. Without a spec the newest tag is pinned as ^X.Y.Z, like npm.
+add :: proc(targets: []string) -> errs.Error {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+
+	for target in targets {
+		alias, source := split_alias(target)
+		arg, has_spec, spec := partition_last(source, "@")
+		module := alias if alias != "" else normalize_module(arg)
+		if module == "" do return errs.fail("bad module %q", target)
+
+		if spec == "none" {
+			delete_key(&m.dependencies, module)
+			continue
+		}
+		if strings.contains(arg, "://") || strings.has_prefix(arg, "git@") {
+			// keep the source so `install` can find it again
+			if !strings.has_prefix(arg, fmt.tprintf("https://%s", module)) do spec = fmt.aprintf("%s#%s", arg, spec)
+		}
+		if !has_spec || spec == "" || spec == "latest" {
+			spec = latest_spec(module, spec) or_return
+		}
+		m.dependencies[module] = spec
+		fmt.printfln("%s %s", module, spec)
+	}
+
+	updated := make([]string, len(targets))
+	for target, i in targets {
+		alias, source := split_alias(target)
+		arg, _, _ := partition_last(source, "@")
+		updated[i] = alias if alias != "" else normalize_module(arg)
+	}
+	install(root, m, update = updated) or_return
+	for module, i in updated {
+		if !strings.has_suffix(targets[i], "@none") do fmt.printfln("import \"%s/%s\"", MODULES_DIR, install_name(module))
+	}
+	return nil
+}
+
+// "name=url@ver" installs a source under a name of your choosing, like npm aliases.
+@(private)
+split_alias :: proc(target: string) -> (alias, source: string) {
+	eq := strings.index_byte(target, '=')
+	scheme := strings.index(target, "://")
+	if eq <= 0 || (scheme >= 0 && eq > scheme) do return "", target
+	return target[:eq], target[eq + 1:]
+}
+
+@(private)
+latest_spec :: proc(module, source: string) -> (spec: string, err: errs.Error) {
+	url, _ := split_spec(module, source)
+	tag := newest_tag(module, url) or_return
+	v, is_semver := semver.parse(tag)
+	pinned := fmt.aprintf("^%d.%d.%d", v.major, v.minor, v.patch) if is_semver else "latest"
+	if source != "" && strings.contains(source, "#") {
+		base, _, _ := strings.partition(source, "#")
+		return fmt.aprintf("%s#%s", base, pinned), nil
+	}
+	return pinned, nil
+}
+
+// "git@github.com:a/b@v1" splits at the last '@' that comes after the host part.
+@(private)
+partition_last :: proc(s, sep: string) -> (head: string, found: bool, tail: string) {
+	i := strings.last_index(s, sep)
+	if i <= 0 || (strings.has_prefix(s, "git@") && i == 3) do return s, false, ""
+	return s[:i], true, s[i + len(sep):]
+}
+
+remove :: proc(modules: []string) -> errs.Error {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+	for arg in modules {
+		module := normalize_module(arg)
+		if module not_in m.dependencies do return errs.fail("%s is not a dependency", module)
+		delete_key(&m.dependencies, module)
+	}
+	return install(root, m)
+}
+
+update :: proc(modules: []string) -> errs.Error {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+	names := make([]string, len(modules))
+	for arg, i in modules do names[i] = normalize_module(arg)
+	return install(root, m, update_all = len(names) == 0, update = names)
+}
+
+install_all :: proc() -> errs.Error {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+	return install(root, m)
+}
+
+list :: proc() -> errs.Error {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+	lock := load_lock(root) or_return
+	fmt.printfln("%s@%s %s", m.name, m.version, root)
+	if len(lock.modules) == 0 {
+		fmt.println("(no dependencies)")
+		return nil
+	}
+	for module in sorted_keys(lock.modules) {
+		e := lock.modules[module]
+		indirect := "" if module in m.dependencies else " (indirect)"
+		missing := "" if os.is_directory(join(root, MODULES_DIR, install_name(module))) else "  MISSING (run `vpm install`)"
+		fmt.printfln("  %s %s (%s)%s%s", module, e.version, short(e.commit), indirect, missing)
+	}
+	return nil
+}
+
+has_script :: proc(name: string) -> bool {
+	root, root_err := find_root()
+	if root_err != nil do return false
+	m, m_err := load_manifest(root)
+	if m_err != nil do return false
+	return name in m.scripts
+}
+
+run_script :: proc(args: []string) -> (exit_code: int, err: errs.Error) {
+	root := find_root() or_return
+	m := load_manifest(root) or_return
+	if len(args) == 0 {
+		for name in sorted_keys(m.scripts) do fmt.printfln("  %s: %s", name, m.scripts[name])
+		return 0, nil
+	}
+	script, ok := m.scripts[args[0]]
+	if !ok do return 1, errs.fail("no script %q in %s", args[0], MANIFEST_FILE)
+
+	command := strings.builder_make()
+	strings.write_string(&command, script)
+	for arg in args[1:] {
+		strings.write_byte(&command, ' ')
+		strings.write_string(&command, sh.quote(arg, context.temp_allocator))
+	}
+	line := strings.to_string(command)
+	fmt.eprintfln("> %s", line)
+	code := sh.run_attached({work_dir = root}, {"sh", "-c", line}) catch e {
+		return 1, errs.from_os(e, "run %s", args[0])
+	}
+	return code, nil
+}
+
+clean :: proc(cache: bool) -> errs.Error {
+	root := find_root() or_return
+	os.remove_all(join(root, MODULES_DIR))
+	fmt.printfln("removed %s", MODULES_DIR)
+	if cache {
+		dir := default_cache()
+		os.remove_all(dir)
+		fmt.printfln("removed %s", dir)
+	}
+	return nil
+}

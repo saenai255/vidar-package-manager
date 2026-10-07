@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "vidar",
+      "request": "launch",
+      "name": "Debug vpm",
+      "program": "${workspaceFolder}",
+      "args": []
+    }
+  ]
+}

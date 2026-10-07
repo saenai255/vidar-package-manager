@@ -1,0 +1,27 @@
+package errs
+
+import "core:fmt"
+import "core:os"
+
+Failure :: struct {
+	message: string,
+}
+
+Error :: union {
+	Failure,
+}
+
+fail :: proc(format: string, args: ..any) -> Error {
+	return Failure{fmt.aprintf(format, ..args)}
+}
+
+from_os :: proc(err: os.Error, what: string, args: ..any) -> Error {
+	return Failure{fmt.aprintf("%s: %s", fmt.tprintf(what, ..args), os.error_string(err))}
+}
+
+message :: proc(err: Error) -> string {
+	switch e in err {
+	case Failure: return e.message
+	}
+	return ""
+}

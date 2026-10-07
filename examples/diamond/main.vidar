@@ -1,0 +1,12 @@
+package main
+
+import "core:fmt"
+import "deps/gadget"
+import "deps/sprocket"
+import "deps/widget"
+
+// widget and sprocket share one gadget, so their Things are the same type as ours
+main :: proc() {
+	t: gadget.Thing = sprocket.grow(widget.make_thing())
+	fmt.println(gadget.describe(t), t.size)
+}

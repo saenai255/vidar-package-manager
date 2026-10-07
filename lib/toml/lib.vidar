@@ -1,0 +1,303 @@
+package toml
+
+import "core:slice"
+import "core:strings"
+import "core:testing"
+import "../errs"
+
+// The subset vpm needs: string values in the root table and in [tables].
+Table :: map[string]string
+
+Document :: struct {
+	root:   Table,
+	tables: map[string]Table,
+}
+
+@(private)
+Cursor :: struct {
+	s: string,
+	i: int,
+}
+
+parse :: proc(text: string) -> (doc: Document, err: errs.Error) {
+	doc.root = make(Table)
+	doc.tables = make(map[string]Table)
+	section := ""
+	in_root := true
+	for raw, n in strings.split_lines(text, context.temp_allocator) {
+		c := Cursor{strings.trim_right(raw, "\r"), 0}
+		skip_space(&c)
+		if at_end(&c) do continue
+
+		if peek(&c) == '[' {
+			name, ok := parse_header(&c)
+			if !ok do return doc, errs.fail("line %d: bad table header", n + 1)
+			if name in doc.tables do return doc, errs.fail("line %d: table [%s] defined twice", n + 1, name)
+			doc.tables[name] = make(Table)
+			section, in_root = name, false
+			continue
+		}
+
+		key, value, ok := parse_pair(&c)
+		if !ok do return doc, errs.fail("line %d: expected key = \"string\"", n + 1)
+		table := doc.root if in_root else doc.tables[section]
+		if key in table do return doc, errs.fail("line %d: %q defined twice", n + 1, key)
+		table[key] = value
+		if in_root do doc.root = table
+		else do doc.tables[section] = table
+	}
+	return doc, nil
+}
+
+// Rewrites only the given table's entries, keeping comments, order and everything else.
+set_table :: proc(text, name: string, entries: Table) -> string {
+	lines := strings.split_lines(strings.trim_right(text, "\n"), context.temp_allocator)
+	start, end := -1, len(lines)
+	for line, i in lines {
+		c := Cursor{line, 0}
+		skip_space(&c)
+		if at_end(&c) || peek(&c) != '[' do continue
+		header, _ := parse_header(&c)
+		if start >= 0 {
+			end = i
+			break
+		}
+		if header == name do start = i
+	}
+
+	out := strings.builder_make()
+	if start < 0 {
+		strings.write_string(&out, text)
+		if len(text) > 0 do strings.write_string(&out, "\n" if strings.has_suffix(text, "\n") else "\n\n")
+		write_header(&out, name)
+		write_table(&out, entries)
+		return strings.to_string(out)
+	}
+
+	seen := make(map[string]bool, context.temp_allocator)
+	kept := make([dynamic]string, context.temp_allocator)
+	insert_at := 0
+	for line in lines[start + 1:end] {
+		c := Cursor{line, 0}
+		key, value, ok := parse_pair(&c)
+		if !ok {
+			append(&kept, line)
+			if strings.trim_space(line) != "" do insert_at = len(kept)
+			continue
+		}
+		want, present := entries[key]
+		if !present do continue
+		seen[key] = true
+		append(&kept, line if value == want else format_pair(key, want))
+		insert_at = len(kept)
+	}
+
+	// new entries go after the section's last non-blank line
+	missing := make(Table, context.temp_allocator)
+	for key, value in entries {
+		if !seen[key] do missing[key] = value
+	}
+	for line in lines[:start + 1] do write_line(&out, line)
+	for line in kept[:insert_at] do write_line(&out, line)
+	write_table(&out, missing)
+	for line in kept[insert_at:] do write_line(&out, line)
+	for line in lines[end:] do write_line(&out, line)
+	return strings.to_string(out)
+}
+
+write_header :: proc(b: ^strings.Builder, name: string) {
+	strings.write_byte(b, '[')
+	write_key(b, name)
+	strings.write_string(b, "]\n")
+}
+
+// Entries sorted by key, one per line.
+write_table :: proc(b: ^strings.Builder, t: Table) {
+	keys := make([]string, len(t), context.temp_allocator)
+	i := 0
+	for k in t {
+		keys[i] = k
+		i += 1
+	}
+	slice.sort(keys)
+	for k in keys do write_line(b, format_pair(k, t[k]))
+}
+
+write_pair :: proc(b: ^strings.Builder, key, value: string) {
+	write_line(b, format_pair(key, value))
+}
+
+@(private)
+format_pair :: proc(key, value: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	write_key(&b, key)
+	strings.write_string(&b, " = ")
+	write_string(&b, value)
+	return strings.to_string(b)
+}
+
+@(private)
+write_line :: proc(b: ^strings.Builder, line: string) {
+	strings.write_string(b, line)
+	strings.write_byte(b, '\n')
+}
+
+@(private)
+write_key :: proc(b: ^strings.Builder, key: string) {
+	bare := len(key) > 0
+	for ch in transmute([]u8)key do if !is_bare(ch) do bare = false
+	if bare do strings.write_string(b, key)
+	else do write_string(b, key)
+}
+
+@(private)
+write_string :: proc(b: ^strings.Builder, s: string) {
+	strings.write_byte(b, '"')
+	for ch in transmute([]u8)s {
+		switch ch {
+		case '"':  strings.write_string(b, `\"`)
+		case '\\': strings.write_string(b, `\\`)
+		case '\n': strings.write_string(b, `\n`)
+		case '\t': strings.write_string(b, `\t`)
+		case '\r': strings.write_string(b, `\r`)
+		case:      strings.write_byte(b, ch)
+		}
+	}
+	strings.write_byte(b, '"')
+}
+
+@(private)
+parse_header :: proc(c: ^Cursor) -> (name: string, ok: bool) {
+	c.i += 1
+	skip_space(c)
+	name = parse_key(c) or_return
+	skip_space(c)
+	if peek(c) != ']' do return "", false
+	c.i += 1
+	skip_space(c)
+	return name, at_end(c)
+}
+
+@(private)
+parse_pair :: proc(c: ^Cursor) -> (key, value: string, ok: bool) {
+	skip_space(c)
+	key = parse_key(c) or_return
+	skip_space(c)
+	if peek(c) != '=' do return "", "", false
+	c.i += 1
+	skip_space(c)
+	value = parse_string(c) or_return
+	skip_space(c)
+	return key, value, at_end(c)
+}
+
+@(private)
+parse_key :: proc(c: ^Cursor) -> (key: string, ok: bool) {
+	if ch := peek(c); ch == '"' || ch == '\'' do return parse_string(c)
+	start := c.i
+	for c.i < len(c.s) && is_bare(c.s[c.i]) do c.i += 1
+	return c.s[start:c.i], c.i > start
+}
+
+@(private)
+parse_string :: proc(c: ^Cursor) -> (s: string, ok: bool) {
+	quote := peek(c)
+	if quote != '"' && quote != '\'' do return "", false
+	c.i += 1
+	b := strings.builder_make()
+	for c.i < len(c.s) {
+		ch := c.s[c.i]
+		c.i += 1
+		if ch == quote do return strings.to_string(b), true
+		if ch != '\\' || quote == '\'' {
+			strings.write_byte(&b, ch)
+			continue
+		}
+		if c.i >= len(c.s) do return "", false
+		esc := c.s[c.i]
+		c.i += 1
+		switch esc {
+		case '"', '\\': strings.write_byte(&b, esc)
+		case 'n':       strings.write_byte(&b, '\n')
+		case 't':       strings.write_byte(&b, '\t')
+		case 'r':       strings.write_byte(&b, '\r')
+		case:           return "", false
+		}
+	}
+	return "", false
+}
+
+@(private)
+is_bare :: proc(ch: u8) -> bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-'
+}
+
+@(private)
+peek :: proc(c: ^Cursor) -> u8 {
+	return c.s[c.i] if c.i < len(c.s) else 0
+}
+
+@(private)
+skip_space :: proc(c: ^Cursor) {
+	for c.i < len(c.s) && (c.s[c.i] == ' ' || c.s[c.i] == '\t') do c.i += 1
+}
+
+@(private)
+at_end :: proc(c: ^Cursor) -> bool {
+	return c.i >= len(c.s) || c.s[c.i] == '#'
+}
+
+@(test)
+test_parse :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	text := `# vpm
+name = "app" # trailing
+'raw key' = 'C:\path'
+
+[dependencies]
+"github.com/a/b" = "^1.0.0"
+mylib = "file:///x#\"main\""
+`
+	doc, err := parse(text)
+	testing.expect(t, err == nil)
+	testing.expect_value(t, doc.root["name"], "app")
+	testing.expect_value(t, doc.root["raw key"], `C:\path`)
+	testing.expect_value(t, doc.tables["dependencies"]["github.com/a/b"], "^1.0.0")
+	testing.expect_value(t, doc.tables["dependencies"]["mylib"], `file:///x#"main"`)
+
+	_, bad := parse("version = 1\n")
+	testing.expect(t, bad != nil)
+}
+
+@(test)
+test_set_table :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	text := `name = "app"
+
+[dependencies]
+# pinned for the parser fix
+a = "^1.0.0"
+b = "^2.0.0"
+
+[scripts]
+run = "vidar run ."
+`
+	one := make(Table)
+	one["a"] = "1"
+	deps := make(Table)
+	deps["a"] = "^1.1.0"
+	deps["c"] = "latest"
+	want := `name = "app"
+
+[dependencies]
+# pinned for the parser fix
+a = "^1.1.0"
+c = "latest"
+
+[scripts]
+run = "vidar run ."
+`
+	testing.expect_value(t, set_table(text, "dependencies", deps), want)
+	testing.expect_value(t, set_table("[dependencies]\n# local\n\n[x]\n", "dependencies", one), "[dependencies]\n# local\na = \"1\"\n\n[x]\n")
+	testing.expect_value(t, set_table(`name = "app"`, "dependencies", one), "name = \"app\"\n\n[dependencies]\na = \"1\"\n")
+}

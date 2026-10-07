@@ -1,0 +1,10 @@
+package gadget
+
+Thing :: struct {
+	name: string,
+	size: int,
+}
+
+describe :: proc(t: Thing) -> string {
+	return t.name
+}

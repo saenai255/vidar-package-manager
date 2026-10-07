@@ -1,0 +1,123 @@
+package semver
+
+import "core:strconv"
+import "core:strings"
+import "core:testing"
+
+Version :: struct {
+	major, minor, patch: int,
+	pre:                 string,
+}
+
+Op :: enum {
+	Any,
+	Exact,
+	Caret,
+	Tilde,
+	At_Least,
+}
+
+Constraint :: struct {
+	op: Op,
+	v:  Version,
+}
+
+parse :: proc(s: string) -> (v: Version, ok: bool) {
+	rest := strings.trim_prefix(s, "v")
+	rest, _, _ = strings.partition(rest, "+")
+	rest, _, v.pre = strings.partition(rest, "-")
+
+	parts: [3]int
+	n := 0
+	for part in strings.split_iterator(&rest, ".") {
+		if n == 3 || len(part) == 0 do return {}, false
+		value, num_ok := strconv.parse_int(part, 10)
+		if !num_ok || value < 0 do return {}, false
+		parts[n] = value
+		n += 1
+	}
+	if n == 0 do return {}, false
+	return {parts[0], parts[1], parts[2], v.pre}, true
+}
+
+compare :: proc(a, b: Version) -> int {
+	if a.major != b.major do return a.major < b.major ? -1 : 1
+	if a.minor != b.minor do return a.minor < b.minor ? -1 : 1
+	if a.patch != b.patch do return a.patch < b.patch ? -1 : 1
+	switch {
+	case a.pre == b.pre: return 0
+	case a.pre == "":    return 1
+	case b.pre == "":    return -1
+	}
+	return a.pre < b.pre ? -1 : 1
+}
+
+// `ok` is false when `s` is not a range, i.e. a plain git ref.
+parse_constraint :: proc(s: string) -> (c: Constraint, ok: bool) {
+	switch s {
+	case "", "*", "latest": return {op = .Any}, true
+	}
+	rest := s
+	switch {
+	case strings.has_prefix(s, "^"):  c.op, rest = .Caret, s[1:]
+	case strings.has_prefix(s, "~"):  c.op, rest = .Tilde, s[1:]
+	case strings.has_prefix(s, ">="): c.op, rest = .At_Least, s[2:]
+	case:                             c.op = .Exact
+	}
+	c.v = parse(rest) or_return
+	return c, true
+}
+
+satisfies :: proc(c: Constraint, v: Version) -> bool {
+	if c.op == .Exact do return compare(v, c.v) == 0
+	// prereleases only match a constraint on that exact release
+	if v.pre != "" && (c.v.pre == "" || v.major != c.v.major || v.minor != c.v.minor || v.patch != c.v.patch) do return false
+	if c.op == .Any do return true
+	if compare(v, c.v) < 0 do return false
+
+	#partial switch c.op {
+	case .Caret:
+		if c.v.major > 0 do return v.major == c.v.major
+		if c.v.minor > 0 do return v.major == 0 && v.minor == c.v.minor
+		return v.major == 0 && v.minor == 0 && v.patch == c.v.patch
+	case .Tilde:
+		return v.major == c.v.major && v.minor == c.v.minor
+	}
+	return true
+}
+
+// Index of the highest tag satisfying `c`, or -1.
+best_match :: proc(c: Constraint, tags: []string) -> int {
+	best := -1
+	best_v: Version
+	for tag, i in tags {
+		v := parse(tag) or_continue
+		if !satisfies(c, v) do continue
+		if best < 0 || compare(v, best_v) > 0 {
+			best, best_v = i, v
+		}
+	}
+	return best
+}
+
+@(test)
+test_constraints :: proc(t: ^testing.T) {
+	tags := []string{"v0.9.0", "v1.0.0", "v1.2.3", "v1.3.0-beta", "v2.0.0", "nightly"}
+	cases := []struct { spec: string, want: int }{
+		{"", 4},
+		{"^1.0.0", 2},
+		{"~1.0.0", 1},
+		{"v1.2.3", 2},
+		{"1.2.3", 2},
+		{">=1.3.0", 4},
+		{"^0.9", 0},
+		{"^3.0.0", -1},
+	}
+	for tc in cases {
+		c, ok := parse_constraint(tc.spec)
+		testing.expect(t, ok, tc.spec)
+		testing.expect_value(t, best_match(c, tags), tc.want)
+	}
+	_, is_range := parse_constraint("main")
+	testing.expect(t, !is_range)
+}

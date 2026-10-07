@@ -1,0 +1,85 @@
+package main
+
+import "core:fmt"
+import "core:os"
+import "../../lib/errs"
+import "../../lib/vpm"
+
+VERSION :: "0.1.0"
+
+USAGE :: `vpm - package manager for Vidar
+
+usage: vpm <command> [arguments]
+
+commands:
+  init [name]                 create project.toml in the current directory
+  install, i                  install everything in project.toml (honours vpm.lock)
+  get, add <module[@ver]>...  add or change dependencies, then install
+                              ver: v1.2.3, ^1.2.0, ~1.2.0, >=1.0.0, latest, a branch or a commit;
+                              @none removes the dependency
+  remove, rm <module>...      remove dependencies
+  update, up [module...]      re-resolve versions within their ranges, ignoring the lock
+  list, ls                    show the installed dependency tree
+  run [script] [args...]      run a script from project.toml (no script: list them)
+  <script> [args...]          same as run, for scripts not shadowed by a command
+  clean [--cache]             delete deps (and the shared module cache)
+  version                     print the vpm version
+
+modules are git repositories named like Go modules: github.com/user/repo.
+Another source can be given as a URL: vpm get git@host:user/repo@^1.0.0
+They are installed into deps/<user>/<repo>; import them relatively:
+  import "deps/user/repo"
+`
+
+main :: proc() {
+	args := os.args[1:]
+	if len(args) == 0 {
+		fmt.eprint(USAGE)
+		os.exit(2)
+	}
+	command, rest := args[0], args[1:]
+
+	err: errs.Error
+	switch command {
+	case "init":
+		err = vpm.init_project(rest[0] if len(rest) > 0 else "")
+	case "install", "i":
+		if len(rest) > 0 do err = vpm.add(rest)
+		else do err = vpm.install_all()
+	case "get", "add":
+		if len(rest) > 0 do err = vpm.add(rest)
+		else do err = vpm.install_all()
+	case "remove", "rm", "uninstall":
+		if len(rest) == 0 do err = errs.fail("usage: vpm %s <module>...", command)
+		else do err = vpm.remove(rest)
+	case "update", "up":
+		err = vpm.update(rest)
+	case "list", "ls":
+		err = vpm.list()
+	case "run":
+		run(rest)
+	case "clean":
+		err = vpm.clean(len(rest) > 0 && rest[0] == "--cache")
+	case "version", "--version", "-v":
+		fmt.println("vpm", VERSION)
+	case "help", "--help", "-h":
+		fmt.print(USAGE)
+	case:
+		if vpm.has_script(command) do run(args)
+		fmt.eprintfln("vpm: unknown command %q\n", command)
+		fmt.eprint(USAGE)
+		os.exit(2)
+	}
+	if err != nil do fail(err)
+}
+
+run :: proc(args: []string) -> ! {
+	code, err := vpm.run_script(args)
+	if err != nil do fail(err)
+	os.exit(code)
+}
+
+fail :: proc(err: errs.Error) -> ! {
+	fmt.eprintln("vpm:", errs.message(err))
+	os.exit(1)
+}

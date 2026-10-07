@@ -1,0 +1,41 @@
+package sh
+
+import "core:os"
+import "core:strings"
+
+Env :: struct {
+	work_dir: string,
+}
+
+Result :: struct {
+	stdout:    string,
+	stderr:    string,
+	exit_code: int,
+}
+
+run :: proc(env: Env, process: string, args: []string = nil, allocator := context.allocator) -> (res: Result, err: os.Error) {
+	command := make([dynamic]string, 0, len(args) + 1, context.temp_allocator)
+	append(&command, process)
+	append(&command, ..args)
+
+	state, stdout, stderr := os.process_exec({command = command[:], working_dir = env.work_dir}, allocator) or_return
+	return {string(stdout), string(stderr), state.exit_code}, nil
+}
+
+// Runs with the terminal attached, for user-facing commands.
+run_attached :: proc(env: Env, command: []string) -> (exit_code: int, err: os.Error) {
+	p := os.process_start({
+		command     = command,
+		working_dir = env.work_dir,
+		stdin       = os.stdin,
+		stdout      = os.stdout,
+		stderr      = os.stderr,
+	}) or_return
+	state := os.process_wait(p) or_return
+	return state.exit_code, nil
+}
+
+quote :: proc(arg: string, allocator := context.allocator) -> string {
+	escaped, _ := strings.replace_all(arg, "'", `'\''`, context.temp_allocator)
+	return strings.concatenate({"'", escaped, "'"}, allocator)
+}

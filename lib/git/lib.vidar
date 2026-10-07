@@ -1,0 +1,70 @@
+package git
+
+import "core:os"
+import "core:strings"
+import "../errs"
+import "../sh"
+
+Ref :: struct {
+	name: string,
+	sha:  string,
+}
+
+Remote_Refs :: struct {
+	head:  string,
+	tags:  [dynamic]Ref,
+	heads: [dynamic]Ref,
+}
+
+is_available :: proc() -> bool {
+	res := sh.run({}, "git", {"--version"}) catch { return false }
+	return res.exit_code == 0
+}
+
+@(private)
+output :: proc(work_dir: string, args: ..string) -> (out: string, err: errs.Error) {
+	res := sh.run({work_dir = work_dir}, "git", args) catch os_err {
+		return "", errs.from_os(os_err, "git %s", args[0])
+	}
+	if res.exit_code != 0 {
+		return "", errs.fail("git %s failed (exit %d): %s", strings.join(args, " ", context.temp_allocator), res.exit_code, strings.trim_space(res.stderr))
+	}
+	return strings.trim_space(res.stdout), nil
+}
+
+@(private)
+exec :: proc(work_dir: string, args: ..string) -> errs.Error {
+	_, err := output(work_dir, ..args)
+	return err
+}
+
+ls_remote :: proc(url: string) -> (refs: Remote_Refs, err: errs.Error) {
+	out := output("", "ls-remote", url) or_return
+	peeled := make(map[string]string, context.temp_allocator)
+	for line in strings.split_lines_iterator(&out) {
+		sha, _, ref := strings.partition(line, "\t")
+		switch {
+		case ref == "HEAD":
+			refs.head = sha
+		case strings.has_prefix(ref, "refs/heads/"):
+			append(&refs.heads, Ref{ref[len("refs/heads/"):], sha})
+		case strings.has_prefix(ref, "refs/tags/") && strings.has_suffix(ref, "^{}"):
+			peeled[ref[len("refs/tags/"):len(ref) - len("^{}")]] = sha
+		case strings.has_prefix(ref, "refs/tags/"):
+			append(&refs.tags, Ref{ref[len("refs/tags/"):], sha})
+		}
+	}
+	for &tag in refs.tags {
+		if sha, ok := peeled[tag.name]; ok do tag.sha = sha
+	}
+	return
+}
+
+// Shallow-fetches a tag, branch or commit of `url` into a new `dir`.
+fetch :: proc(url, ref, dir: string) -> (commit: string, err: errs.Error) {
+	os.make_directory_all(dir) catch e { return "", errs.from_os(e, "create %s", dir) }
+	exec(dir, "init", "-q") or_return
+	exec(dir, "fetch", "-q", "--depth=1", url, ref) or_return
+	exec(dir, "-c", "advice.detachedHead=false", "checkout", "-q", "FETCH_HEAD") or_return
+	return output(dir, "rev-parse", "HEAD")
+}

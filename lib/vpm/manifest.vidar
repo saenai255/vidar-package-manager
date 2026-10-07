@@ -1,0 +1,173 @@
+package vpm
+
+import "core:encoding/json"
+import "core:os"
+import "core:slice"
+import "core:strings"
+import "../errs"
+import "../toml"
+
+MANIFEST_FILE :: "project.toml"
+LOCK_FILE :: "vpm.lock"
+MODULES_DIR :: "deps"
+LOCK_VERSION :: 2
+
+Manifest :: struct {
+	name:         string,
+	version:      string,
+	description:  string,
+	author:       string,
+	license:      string,
+	scripts:      map[string]string,
+	dependencies: map[string]string,
+}
+
+Lock_Entry :: struct {
+	url:     string `json:"url"`,
+	version: string `json:"version"`,
+	commit:  string `json:"commit"`,
+}
+
+// Keyed by module; each is installed once, at deps/<install_name(module)>.
+Lock :: struct {
+	lock_version: int                   `json:"lockVersion"`,
+	modules:      map[string]Lock_Entry `json:"modules"`,
+}
+
+read_json :: proc(path: string, out: ^$T) -> (found: bool, err: errs.Error) {
+	if !os.exists(path) do return false, nil
+	data := os.read_entire_file(path, context.allocator) catch e {
+		return false, errs.from_os(e, "read %s", path)
+	}
+	if e := json.unmarshal(data, out); e != nil {
+		return false, errs.fail("parse %s: %v", path, e)
+	}
+	return true, nil
+}
+
+write_json :: proc(path: string, value: $T) -> errs.Error {
+	data := json.marshal(value, {pretty = true, use_spaces = true, spaces = 2, sort_maps_by_key = true}) catch e {
+		return errs.fail("encode %s: %v", path, e)
+	}
+	text := strings.concatenate({collapse_empty_objects(string(data)), "\n"}, context.temp_allocator)
+	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// json.marshal writes an empty map as "{\n\n  }".
+@(private)
+collapse_empty_objects :: proc(text: string) -> string {
+	out := strings.builder_make(context.temp_allocator)
+	rest := text
+	for {
+		i := strings.index(rest, "{\n\n")
+		if i < 0 do break
+		j := i + len("{\n\n")
+		for j < len(rest) && rest[j] == ' ' do j += 1
+		if j < len(rest) && rest[j] == '}' {
+			strings.write_string(&out, rest[:i])
+			strings.write_string(&out, "{}")
+			rest = rest[j + 1:]
+		} else {
+			strings.write_string(&out, rest[:j])
+			rest = rest[j:]
+		}
+	}
+	strings.write_string(&out, rest)
+	return strings.to_string(out)
+}
+
+// Walks up from the working directory to the nearest project.toml, like npm.
+find_root :: proc() -> (root: string, err: errs.Error) {
+	dir := os.get_working_directory(context.allocator) catch e {
+		return "", errs.from_os(e, "working directory")
+	}
+	for {
+		if os.exists(join(dir, MANIFEST_FILE)) do return dir, nil
+		parent := os.dir(dir)
+		if parent == dir || parent == "" do break
+		dir = parent
+	}
+	return "", errs.fail("no %s found here or in any parent directory (run `vpm init`)", MANIFEST_FILE)
+}
+
+load_manifest :: proc(root: string) -> (m: Manifest, err: errs.Error) {
+	m, _ = read_manifest(join(root, MANIFEST_FILE)) or_return
+	return
+}
+
+read_manifest :: proc(path: string) -> (m: Manifest, found: bool, err: errs.Error) {
+	if !os.exists(path) do return {}, false, nil
+	data := os.read_entire_file(path, context.allocator) catch e {
+		return {}, false, errs.from_os(e, "read %s", path)
+	}
+	doc, parse_err := toml.parse(string(data))
+	if parse_err != nil do return {}, false, errs.fail("parse %s: %s", path, errs.message(parse_err))
+	m = {
+		name         = doc.root["name"],
+		version      = doc.root["version"],
+		description  = doc.root["description"],
+		author       = doc.root["author"],
+		license      = doc.root["license"],
+		scripts      = doc.tables["scripts"],
+		dependencies = doc.tables["dependencies"],
+	}
+	if m.dependencies == nil do m.dependencies = make(map[string]string)
+	return m, true, nil
+}
+
+write_manifest :: proc(path: string, m: Manifest) -> errs.Error {
+	b := strings.builder_make()
+	toml.write_pair(&b, "name", m.name)
+	toml.write_pair(&b, "version", m.version)
+	if m.description != "" do toml.write_pair(&b, "description", m.description)
+	if m.author != "" do toml.write_pair(&b, "author", m.author)
+	if m.license != "" do toml.write_pair(&b, "license", m.license)
+	strings.write_byte(&b, '\n')
+	toml.write_header(&b, "scripts")
+	toml.write_table(&b, m.scripts)
+	strings.write_byte(&b, '\n')
+	toml.write_header(&b, "dependencies")
+	toml.write_table(&b, m.dependencies)
+	os.write_entire_file(path, strings.to_string(b)) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// Only dependencies change after `vpm init`, so the rest of the file is left as written.
+@(private)
+save_dependencies :: proc(path: string, deps: map[string]string) -> errs.Error {
+	data := os.read_entire_file(path, context.allocator) catch e { return errs.from_os(e, "read %s", path) }
+	text := toml.set_table(string(data), "dependencies", deps)
+	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// A lock from another lock version is ignored, so everything resolves afresh.
+load_lock :: proc(root: string) -> (lock: Lock, err: errs.Error) {
+	read_json(join(root, LOCK_FILE), &lock) or_return
+	if lock.lock_version != LOCK_VERSION do return {}, nil
+	return
+}
+
+save :: proc(root: string, m: Manifest, lock: Lock) -> errs.Error {
+	save_dependencies(join(root, MANIFEST_FILE), m.dependencies) or_return
+	lock := lock
+	lock.lock_version = LOCK_VERSION
+	return write_json(join(root, LOCK_FILE), lock)
+}
+
+join :: proc(parts: ..string) -> string {
+	path, _ := os.join_path(parts, context.allocator)
+	return path
+}
+
+sorted_keys :: proc(m: map[$K]$V) -> []K {
+	keys := make([]K, len(m))
+	i := 0
+	for k in m {
+		keys[i] = k
+		i += 1
+	}
+	slice.sort(keys)
+	return keys
+}

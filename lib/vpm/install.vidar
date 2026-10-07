@@ -1,0 +1,384 @@
+package vpm
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "../errs"
+import "../git"
+import "../semver"
+
+MAX_ROUNDS :: 20
+
+Installer :: struct {
+	root:       string,
+	cache:      string,
+	manifest:   Manifest,
+	old_lock:   Lock,
+	update_all: bool,
+	update:     map[string]bool,
+	remotes:    map[string]git.Remote_Refs,
+}
+
+// One request for a module: `from` is MANIFEST_FILE or the requiring module.
+Requirement :: struct {
+	from: string,
+	url:  string,
+	spec: string,
+}
+
+Choice :: struct {
+	url:     string,
+	version: string,
+	commit:  string,
+	dir:     string,
+	deps:    map[string]string,
+}
+
+// "github.com/a/b", "https://github.com/a/b.git", "git@github.com:a/b" all name github.com/a/b.
+normalize_module :: proc(arg: string) -> string {
+	name := arg
+	if _, _, rest := strings.partition(name, "://"); rest != "" do name = rest
+	if strings.has_prefix(name, "git@") {
+		host, _, path := strings.partition(name[len("git@"):], ":")
+		name = strings.concatenate({host, "/", path})
+	}
+	name = strings.trim_suffix(strings.trim_right(name, "/"), ".git")
+	return strings.trim_left(name, "/")
+}
+
+// "github.com/a/b" installs as "a/b"; the host is left out of the path.
+install_name :: proc(module: string) -> string {
+	host, _, rest := strings.partition(module, "/")
+	if rest == "" || !strings.contains_any(host, ".:") do return module
+	return rest
+}
+
+// A spec is a version range or git ref, optionally after a source URL: "<url>#<range>".
+split_spec :: proc(module, spec: string) -> (url, constraint: string) {
+	if source, _, rest := strings.partition(spec, "#"); strings.contains(source, "://") || strings.has_prefix(source, "git@") {
+		return source, rest
+	}
+	return fmt.aprintf("https://%s", module), spec
+}
+
+default_cache :: proc() -> string {
+	if dir := os.get_env("VPM_CACHE", context.allocator); dir != "" do return dir
+	home, _ := os.user_home_dir(context.allocator)
+	return join(home, ".vpm", "cache")
+}
+
+@(private)
+remote :: proc(inst: ^Installer, url: string) -> (refs: git.Remote_Refs, err: errs.Error) {
+	if refs, ok := inst.remotes[url]; ok do return refs, nil
+	refs = git.ls_remote(url) or_return
+	inst.remotes[url] = refs
+	return refs, nil
+}
+
+// The newest tag, or "" when the repository has none.
+newest_tag :: proc(module, url: string) -> (version: string, err: errs.Error) {
+	inst: Installer
+	any := []semver.Constraint{{op = .Any}}
+	version = resolve_ranges(&inst, module, url, any) or_return
+	return version if version != "HEAD" else "", nil
+}
+
+// Newest tag in every range; HEAD when no tag is a version and nothing asks for one.
+resolve_ranges :: proc(inst: ^Installer, module, url: string, ranges: []semver.Constraint) -> (version: string, err: errs.Error) {
+	refs := remote(inst, url) or_return
+	best := -1
+	best_v: semver.Version
+	for tag, i in refs.tags {
+		v := semver.parse(tag.name) or_continue
+		if !satisfies_all(ranges, v) do continue
+		if best < 0 || semver.compare(v, best_v) > 0 do best, best_v = i, v
+	}
+	if best >= 0 do return refs.tags[best].name, nil
+	if refs.head != "" && all_any(ranges) do return "HEAD", nil
+	return "", nil
+}
+
+@(private)
+meets_spec :: proc(version, spec: string) -> bool {
+	rc, is_range := semver.parse_constraint(spec)
+	if !is_range do return version == spec
+	return meets(version, {rc}, "")
+}
+
+@(private)
+satisfies_all :: proc(ranges: []semver.Constraint, v: semver.Version) -> bool {
+	for c in ranges do if !semver.satisfies(c, v) do return false
+	return true
+}
+
+@(private)
+all_any :: proc(ranges: []semver.Constraint) -> bool {
+	for c in ranges do if c.op != .Any do return false
+	return true
+}
+
+// Whether an already resolved version (a tag, HEAD or a ref) meets every requirement.
+@(private)
+meets :: proc(version: string, ranges: []semver.Constraint, ref: string) -> bool {
+	if ref != "" do return version == ref
+	if v, ok := semver.parse(version); ok do return satisfies_all(ranges, v)
+	return version == "HEAD" && all_any(ranges)
+}
+
+// Puts the commit in the shared cache (like Go's module cache) and returns its directory.
+cache_fetch :: proc(inst: ^Installer, module, url, ref, want_commit: string) -> (dir, commit: string, err: errs.Error) {
+	if want_commit != "" {
+		dir = join(inst.cache, fmt.tprintf("%s@%s", module, want_commit))
+		if os.is_directory(dir) do return dir, want_commit, nil
+	}
+
+	tmp := join(inst.cache, ".tmp", fmt.tprintf("%s-%d", strings.replace_all(module, "/", "_", context.temp_allocator), os.get_pid()))
+	os.remove_all(tmp)
+	defer os.remove_all(tmp)
+
+	fetched_commit := do! {
+		if want_commit != "" {
+			if sha, e := git.fetch(url, want_commit, tmp); e == nil do take sha
+			// servers may refuse fetching by commit: refetch the ref and check it didn't move
+			os.remove_all(tmp)
+		}
+		take git.fetch(url, ref, tmp) or_return
+	}
+	if want_commit != "" && fetched_commit != want_commit {
+		return "", "", errs.fail("%s: %s now points to %s, locked at %s (run `vpm update %s`)", module, ref, fetched_commit[:7], want_commit[:7], module)
+	}
+
+	dir = join(inst.cache, fmt.tprintf("%s@%s", module, fetched_commit))
+	if !os.is_directory(dir) {
+		os.remove_all(join(tmp, ".git"))
+		make_dirs(os.dir(dir)) or_return
+		os.rename(tmp, dir) catch e { return "", "", errs.from_os(e, "move %s into cache", module) }
+	}
+	return dir, fetched_commit, nil
+}
+
+make_dirs :: proc(dir: string) -> errs.Error {
+	if os.is_directory(dir) do return nil
+	os.make_directory_all(dir) catch e { return errs.from_os(e, "create %s", dir) }
+	return nil
+}
+
+// remove_all on a symlink would empty its target.
+remove_path :: proc(path: string) {
+	info, e := os.lstat(path, context.temp_allocator)
+	if e != nil do return
+	if info.type == .Symlink do os.remove(path)
+	else do os.remove_all(path)
+}
+
+copy_into :: proc(dest, src: string) -> errs.Error {
+	remove_path(dest)
+	make_dirs(os.dir(dest)) or_return
+	os.copy_directory_all(dest, src) catch e { return errs.from_os(e, "copy %s", dest) }
+	return nil
+}
+
+// Every module required from the project and from the chosen versions of its dependencies.
+@(private)
+collect :: proc(inst: ^Installer, chosen: map[string]Choice) -> map[string][dynamic]Requirement {
+	reqs := make(map[string][dynamic]Requirement)
+	queue := make([dynamic]string, context.temp_allocator)
+	add := proc(reqs: ^map[string][dynamic]Requirement, queue: ^[dynamic]string, from: string, deps: map[string]string) {
+		for module in sorted_keys(deps) {
+			url, spec := split_spec(module, deps[module])
+			if module not_in reqs^ do append(queue, module)
+			list := reqs^[module]
+			append(&list, Requirement{from, url, spec})
+			reqs^[module] = list
+		}
+	}
+	add(&reqs, &queue, MANIFEST_FILE, inst.manifest.dependencies)
+	for i := 0; i < len(queue); i += 1 {
+		module := queue[i]
+		if c, ok := chosen[module]; ok do add(&reqs, &queue, module, c.deps)
+	}
+	return reqs
+}
+
+// Every requirement together; when they can't all be met, the project's own wins, like npm overrides.
+@(private)
+choose :: proc(inst: ^Installer, module: string, reqs: []Requirement, prev: Maybe(Choice)) -> (c: Choice, err: errs.Error) {
+	found: bool
+	c, found = pick(inst, module, reqs, prev) or_return
+	if found do return c, nil
+	for r, i in reqs {
+		if r.from != MANIFEST_FILE do continue
+		c, found = pick(inst, module, reqs[i:i + 1], prev) or_return
+		if found do return c, nil
+	}
+	if len(reqs) == 1 do return {}, errs.fail("%s: no version matches %q", module, reqs[0].spec)
+	return {}, conflict(module, reqs)
+}
+
+@(private)
+pick :: proc(inst: ^Installer, module: string, reqs: []Requirement, prev: Maybe(Choice)) -> (c: Choice, found: bool, err: errs.Error) {
+	ranges := make([dynamic]semver.Constraint, context.temp_allocator)
+	ref := ""
+	for r in reqs {
+		if rc, is_range := semver.parse_constraint(r.spec); is_range {
+			append(&ranges, rc)
+		} else if ref == "" || ref == r.spec {
+			ref = r.spec
+		} else {
+			return {}, false, nil
+		}
+	}
+	if ref != "" && !all_any(ranges[:]) do return {}, false, nil
+	url := reqs[0].url
+
+	if p, ok := prev.?; ok && p.url == url && meets(p.version, ranges[:], ref) do return p, true, nil
+
+	version, want_commit := ref, ""
+	old, locked := inst.old_lock.modules[module]
+	if locked && old.url == url && !inst.update_all && !inst.update[module] && meets(old.version, ranges[:], ref) {
+		version, want_commit = old.version, old.commit
+	} else if ref == "" {
+		version = resolve_ranges(inst, module, url, ranges[:]) or_return
+		if version == "" do return {}, false, nil
+	}
+
+	dir, commit := cache_fetch(inst, module, url, version, want_commit) or_return
+	sub, _ := read_manifest(join(dir, MANIFEST_FILE)) or_return
+	return {url = url, version = version, commit = commit, dir = dir, deps = sub.dependencies}, true, nil
+}
+
+@(private)
+conflict :: proc(module: string, reqs: []Requirement) -> errs.Error {
+	b := strings.builder_make()
+	fmt.sbprintf(&b, "no version of %s meets every requirement:", module)
+	for r in reqs do fmt.sbprintf(&b, "\n  %s (from %s)", r.spec, r.from)
+	fmt.sbprintf(&b, "\nadd %s to %s to choose one", module, MANIFEST_FILE)
+	return errs.fail("%s", strings.to_string(b))
+}
+
+// Picks one version per module, re-resolving until the dependencies of the chosen versions
+// stop adding or changing requirements.
+@(private)
+resolve_all :: proc(inst: ^Installer) -> (chosen: map[string]Choice, err: errs.Error) {
+	for _ in 0 ..< MAX_ROUNDS {
+		reqs := collect(inst, chosen)
+		next := make(map[string]Choice)
+		changed := len(reqs) != len(chosen)
+		for module in sorted_keys(reqs) {
+			prev: Maybe(Choice)
+			if p, ok := chosen[module]; ok do prev = p
+			c := choose(inst, module, reqs[module][:], prev) or_return
+			if p, ok := prev.?; !ok || p.commit != c.commit do changed = true
+			next[module] = c
+		}
+		chosen = next
+		if !changed {
+			warn_overridden(reqs, chosen)
+			return chosen, nil
+		}
+	}
+	return nil, errs.fail("dependency versions did not settle after %d rounds", MAX_ROUNDS)
+}
+
+@(private)
+warn_overridden :: proc(reqs: map[string][dynamic]Requirement, chosen: map[string]Choice) {
+	for module in sorted_keys(reqs) {
+		version := chosen[module].version
+		for r in reqs[module] {
+			if !meets_spec(version, r.spec) do fmt.eprintfln("vpm: %s wants %s %s; %s keeps %s", r.from, module, r.spec, MANIFEST_FILE, version)
+		}
+	}
+}
+
+// Each module's own deps/ holds links to the shared copies, so its relative imports
+// resolve as when it was developed, and every importer shares one package.
+@(private)
+link_deps :: proc(inst: ^Installer, module: string, deps: map[string]string) -> errs.Error {
+	own := join(inst.root, MODULES_DIR, install_name(module), MODULES_DIR)
+	remove_path(own)
+	up := strings.count(install_name(module), "/") + 3
+	for dep in sorted_keys(deps) {
+		name := install_name(dep)
+		link := join(own, name)
+		make_dirs(os.dir(link)) or_return
+		levels := up + strings.count(name, "/")
+		target := strings.concatenate({strings.repeat("../", levels, context.temp_allocator), MODULES_DIR, "/", name})
+		os.symlink(target, link) catch e { return errs.from_os(e, "link %s", link) }
+	}
+	return nil
+}
+
+prune :: proc(inst: ^Installer, lock: Lock) -> (removed: int) {
+	for module in sorted_keys(inst.old_lock.modules) {
+		if module in lock.modules do continue
+		dir := join(inst.root, MODULES_DIR, install_name(module))
+		if !os.exists(dir) do continue
+		remove_path(dir)
+		report("-", module, inst.old_lock.modules[module])
+		removed += 1
+		remove_empty_parents(os.dir(dir), join(inst.root, MODULES_DIR))
+	}
+	return
+}
+
+@(private)
+remove_empty_parents :: proc(dir, stop: string) {
+	dir := dir
+	for len(dir) > len(stop) {
+		entries, e := os.read_all_directory_by_path(dir, context.temp_allocator)
+		if e != nil || len(entries) > 0 do return
+		os.remove(dir)
+		dir = os.dir(dir)
+	}
+}
+
+@(private)
+report :: proc(sign, module: string, e: Lock_Entry) {
+	fmt.printfln("%s %s %s (%s)", sign, module, e.version, short(e.commit))
+}
+
+short :: proc(commit: string) -> string {
+	return commit[:min(7, len(commit))]
+}
+
+// Installs one version of every module the project needs into deps/ and rewrites the lock.
+install :: proc(root: string, m: Manifest, update_all := false, update: []string = nil) -> errs.Error {
+	if !git.is_available() do return errs.fail("git not found on PATH")
+
+	inst := Installer{root = root, cache = default_cache(), manifest = m, update_all = update_all}
+	for module in update do inst.update[module] = true
+	inst.old_lock = load_lock(root) or_return
+
+	chosen := resolve_all(&inst) or_return
+
+	owners := make(map[string]string, context.temp_allocator)
+	for module in sorted_keys(chosen) {
+		name := install_name(module)
+		if other, taken := owners[name]; taken {
+			return errs.fail("%s and %s would both install to %s/%s", other, module, MODULES_DIR, name)
+		}
+		owners[name] = module
+	}
+
+	lock := Lock{modules = make(map[string]Lock_Entry)}
+	fetched, reused := 0, 0
+	for module in sorted_keys(chosen) {
+		c := chosen[module]
+		entry := Lock_Entry{url = c.url, version = c.version, commit = c.commit}
+		dest := join(root, MODULES_DIR, install_name(module))
+		if old, had := inst.old_lock.modules[module]; had && old.commit == c.commit && os.is_directory(dest) {
+			reused += 1
+		} else {
+			copy_into(dest, c.dir) or_return
+			report("+", module, entry)
+			fetched += 1
+		}
+		link_deps(&inst, module, c.deps) or_return
+		lock.modules[module] = entry
+	}
+	removed := prune(&inst, lock)
+	save(root, m, lock) or_return
+
+	fmt.printfln("%d fetched, %d up to date, %d removed", fetched, reused, removed)
+	return nil
+}
