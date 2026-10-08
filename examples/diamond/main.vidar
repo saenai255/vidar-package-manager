@@ -1,9 +1,9 @@
 package main
 
 import "core:fmt"
-import "deps/gadget"
-import "deps/sprocket"
-import "deps/widget"
+import "vendor:gadget"
+import "vendor:sprocket"
+import "vendor:widget"
 
 // widget and sprocket share one gadget, so their Things are the same type as ours
 main :: proc() {

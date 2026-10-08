@@ -3,11 +3,11 @@
 set -e
 cd "$(dirname "$0")"
 here=$(pwd)
-vpm=${VPM:-$here/../../out/vpm}
+vpm=${VPM:-$here/../../out/vpm-bin}
 repos=$here/.repos
 export VPM_CACHE=$repos/cache
 
-rm -rf "$repos" deps vpm.lock project.toml out
+rm -rf "$repos" deps vpm.lock project.toml vidar.toml out
 
 publish() {
 	name=$1

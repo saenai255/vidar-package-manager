@@ -3,3 +3,4 @@ deps/
 out/
 project.toml
 vpm.lock
+vidar.toml

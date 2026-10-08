@@ -6,7 +6,7 @@ license = "MIT"
 vidar = "2026.10.2"
 
 [scripts]
-build = "vidar build cmd/vpm -o out/src && odin build out/src -out:out/vpm"
+build = "vidar build cmd/vpm -bin"
 run = "vidar run cmd/vpm --"
 test = "vidar test lib/semver && vidar test lib/toml"
 

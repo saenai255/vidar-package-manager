@@ -1,6 +1,6 @@
 package widget
 
-import "deps/gadget"
+import "vendor:gadget"
 
 make_thing :: proc() -> gadget.Thing {
 	return {"widget", 42}

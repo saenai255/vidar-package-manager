@@ -74,7 +74,7 @@ add :: proc(targets: []string) -> errs.Error {
 	}
 	install(root, m, update = updated) or_return
 	for module, i in updated {
-		if !strings.has_suffix(targets[i], "@none") do fmt.printfln("import \"%s:\"", alias_name(module))
+		if !strings.has_suffix(targets[i], "@none") do fmt.printfln("import \"%s:%s\"", COLLECTION_NAME, install_name(module))
 	}
 	return nil
 }
