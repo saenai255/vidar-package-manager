@@ -7,7 +7,7 @@ vpm=${VPM:-$here/../../out/vpm}
 repos=$here/.repos
 export VPM_CACHE=$repos/cache
 
-rm -rf "$repos" deps vpm.lock project.toml out
+rm -rf "$repos" deps vpm.lock project.toml vidar.toml out
 
 publish() {
 	name=$1
