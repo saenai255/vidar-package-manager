@@ -59,7 +59,13 @@ jobs:
     steps:
       - name: Compute version
         id: version
-        run: echo "tag=v$(date -u +%Y.%m.%d).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          month=$(date -u +%Y.%m)
+          count=$(gh release list --limit 1000 --json tagName --jq "[.[] | select(.tagName | startswith(\"v$month.\"))] | length")
+          echo "tag=v$month.$((count + 1))" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
