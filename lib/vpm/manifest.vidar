@@ -10,6 +10,7 @@ import "../toml"
 MANIFEST_FILE :: "project.toml"
 LOCK_FILE :: "vpm.lock"
 MODULES_DIR :: "deps"
+COLLECTIONS_FILE :: "vidar.toml"
 LOCK_VERSION :: 2
 
 Manifest :: struct {
@@ -138,6 +139,27 @@ write_manifest :: proc(path: string, m: Manifest) -> errs.Error {
 save_dependencies :: proc(path: string, deps: map[string]string) -> errs.Error {
 	data := os.read_entire_file(path, context.allocator) catch e { return errs.from_os(e, "read %s", path) }
 	text := toml.set_table(string(data), "dependencies", deps)
+	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// The repository name alone: "github.com/a/b" is imported as "b:...".
+alias_name :: proc(module: string) -> string {
+	name := install_name(module)
+	if i := strings.last_index_byte(name, '/'); i >= 0 do return name[i + 1:]
+	return name
+}
+
+// Maps each installed module to a vidar collection; the nearest vidar.toml serves every package below it.
+@(private)
+save_collections :: proc(root: string, lock: Lock) -> errs.Error {
+	path := join(root, COLLECTIONS_FILE)
+	existing, _ := os.read_entire_file(path, context.temp_allocator)
+	collections := make(map[string]string, context.temp_allocator)
+	for module in lock.modules {
+		collections[alias_name(module)] = strings.concatenate({"./", MODULES_DIR, "/", install_name(module)}, context.temp_allocator)
+	}
+	text := toml.set_table(string(existing), "collections", collections)
 	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
 	return nil
 }
