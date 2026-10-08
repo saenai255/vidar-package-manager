@@ -27,8 +27,8 @@ commands:
 
 modules are git repositories named like Go modules: github.com/user/repo.
 Another source can be given as a URL: vpm get git@host:user/repo@^1.0.0
-They are installed into deps/<user>/<repo> and added as collections to vidar.toml:
-  import "repo:package"
+They are installed into deps/<user>/<repo>, served by the "vendor" collection in vidar.toml:
+  import "vendor:<user>/<repo>"
 `
 
 main :: proc() {

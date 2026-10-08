@@ -28,11 +28,11 @@ vpm <script> [args...]                    # same, when no vpm command has that n
 vpm clean [--cache]
 ```
 
-Every installed module is added to `[collections]` in `vidar.toml` under its repository name
-(`repo = "./deps/user/repo"`), so any package in the project imports it the same way:
+`vidar.toml` gets one collection, `vendor = "./deps"`, so any package in the project imports an
+installed module the same way:
 
 ```odin
-import "repo:package"
+import "vendor:user/repo"
 ```
 
 ## Example
@@ -47,7 +47,7 @@ the app; all three share one `gadget` v1.0.0.
   A spec is a version range or git ref, optionally after a source URL: `"<url>#<range>"`.
 - `vpm.lock`: every installed module, with its source URL and the resolved version and commit.
   `vpm install` reuses locked commits; `vpm update` re-resolves them.
-- `vidar.toml`: `[collections]` is rewritten on every install, one alias per module.
+- `vidar.toml`: `[collections]` gets `vendor = "./deps"` on every install.
 - `deps/<user>/<repo>/`: installed sources (the host is left out of the path). Every module is installed
   once, like Go: the newest version that meets every requirement on it. When none does, the version
   `project.toml` asks for wins, with a warning; without one there, `vpm` fails and names the conflict.

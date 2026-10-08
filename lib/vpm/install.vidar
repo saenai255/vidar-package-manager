@@ -354,6 +354,7 @@ check_vidar :: proc(min: string) -> errs.Error {
 	found := strings.trim_prefix(strings.trim_space(res.stdout), "vidar ")
 	have, have_ok := semver.parse(found)
 	if !have_ok do return errs.fail("cannot read the vidar version from %q", found)
+	if strings.has_suffix(found, "-dev") do return nil
 	if semver.compare(have, want) < 0 do return errs.fail("vidar %s is too old: %s needs %s or newer", found, MANIFEST_FILE, min)
 	return nil
 }
@@ -370,18 +371,12 @@ install :: proc(root: string, m: Manifest, update_all := false, update: []string
 	chosen := resolve_all(&inst) or_return
 
 	owners := make(map[string]string, context.temp_allocator)
-	aliases := make(map[string]string, context.temp_allocator)
 	for module in sorted_keys(chosen) {
 		name := install_name(module)
 		if other, taken := owners[name]; taken {
 			return errs.fail("%s and %s would both install to %s/%s", other, module, MODULES_DIR, name)
 		}
 		owners[name] = module
-		alias := alias_name(module)
-		if other, taken := aliases[alias]; taken {
-			return errs.fail("%s and %s would both be imported as %q", other, module, alias)
-		}
-		aliases[alias] = module
 	}
 
 	lock := Lock{modules = make(map[string]Lock_Entry)}
@@ -402,7 +397,7 @@ install :: proc(root: string, m: Manifest, update_all := false, update: []string
 	}
 	removed := prune(&inst, lock)
 	save(root, m, lock) or_return
-	save_collections(root, lock) or_return
+	save_collections(root) or_return
 
 	fmt.printfln("%d fetched, %d up to date, %d removed", fetched, reused, removed)
 	return nil

@@ -1,6 +1,6 @@
 package sprocket
 
-import "gadget"
+import "vendor:gadget"
 
 grow :: proc(t: gadget.Thing) -> gadget.Thing {
 	return {t.name, t.size * 2}
