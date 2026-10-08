@@ -6,6 +6,7 @@ import "core:strings"
 import "../errs"
 import "../git"
 import "../semver"
+import "../sh"
 
 MAX_ROUNDS :: 20
 
@@ -341,9 +342,26 @@ short :: proc(commit: string) -> string {
 	return commit[:min(7, len(commit))]
 }
 
+// `vidar --version` prints "vidar <version>".
+@(private)
+check_vidar :: proc(min: string) -> errs.Error {
+	if min == "" do return nil
+	want, ok := semver.parse(min)
+	if !ok do return errs.fail("%s: bad vidar version %q", MANIFEST_FILE, min)
+
+	res := sh.run({}, "vidar", {"--version"}) catch { return errs.fail("vidar not found on PATH (%s needs %s or newer)", MANIFEST_FILE, min) }
+	if res.exit_code != 0 do return errs.fail("vidar --version failed (exit %d)", res.exit_code)
+	found := strings.trim_prefix(strings.trim_space(res.stdout), "vidar ")
+	have, have_ok := semver.parse(found)
+	if !have_ok do return errs.fail("cannot read the vidar version from %q", found)
+	if semver.compare(have, want) < 0 do return errs.fail("vidar %s is too old: %s needs %s or newer", found, MANIFEST_FILE, min)
+	return nil
+}
+
 // Installs one version of every module the project needs into deps/ and rewrites the lock.
 install :: proc(root: string, m: Manifest, update_all := false, update: []string = nil) -> errs.Error {
 	if !git.is_available() do return errs.fail("git not found on PATH")
+	check_vidar(m.vidar) or_return
 
 	inst := Installer{root = root, cache = default_cache(), manifest = m, update_all = update_all}
 	for module in update do inst.update[module] = true
