@@ -64,8 +64,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           month=$(date -u +%Y.%m)
-          count=$(gh release list --limit 1000 --json tagName --jq "[.[] | select(.tagName | startswith(\"v$month.\"))] | length")
-          echo "tag=v$month.$((count + 1))" >> "$GITHUB_OUTPUT"
+          count=$(gh release list --limit 1000 --json tagName --jq "[.[] | select(.tagName | startswith(\"$month.\"))] | length")
+          echo "tag=$month.$((count + 1))" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
