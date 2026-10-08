@@ -1,0 +1,80 @@
+name: release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event.pull_request.merged == true
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: macos-latest, target: darwin-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install vidar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download -R saenai255/vidar-lang -p 'vidar-*-${{ matrix.target }}.tar.gz' -D "$RUNNER_TEMP/vidar"
+          tar xzf "$RUNNER_TEMP"/vidar/*.tar.gz -C "$RUNNER_TEMP/vidar"
+          echo "$RUNNER_TEMP/vidar" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: |
+          vidar test lib/semver
+          vidar test lib/toml
+
+      - name: Build
+        run: |
+          vidar build cmd/vpm -o out/src
+          odin build out/src -out:out/vpm -o:speed
+
+      - name: Package
+        run: tar czf vpm-${{ matrix.target }}.tar.gz -C out vpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpm-${{ matrix.target }}
+          path: vpm-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Read version
+        id: version
+        run: echo "tag=v$(sed -n 's/^version *= *"\(.*\)"/\1/p' project.toml | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" dist/*.tar.gz \
+            --target "${{ github.event.pull_request.merge_commit_sha }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes
