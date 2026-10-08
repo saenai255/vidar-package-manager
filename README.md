@@ -43,7 +43,7 @@ the app; all three share one `gadget` v1.0.0.
 
 ## Files
 
-- `project.toml`: name, version, description, author, license, scripts, and `dependencies` mapping a module to a spec.
+- `project.toml`: name, version, description, author, license, `vidar` (minimum Vidar release), scripts, and `dependencies` mapping a module to a spec.
   A spec is a version range or git ref, optionally after a source URL: `"<url>#<range>"`.
 - `vpm.lock`: every installed module, with its source URL and the resolved version and commit.
   `vpm install` reuses locked commits; `vpm update` re-resolves them.

@@ -11,6 +11,7 @@ MANIFEST_FILE :: "project.toml"
 LOCK_FILE :: "vpm.lock"
 MODULES_DIR :: "deps"
 COLLECTIONS_FILE :: "vidar.toml"
+MIN_VIDAR :: "2026.10.2" // first release with vidar.toml collections
 LOCK_VERSION :: 2
 
 Manifest :: struct {
@@ -19,6 +20,7 @@ Manifest :: struct {
 	description:  string,
 	author:       string,
 	license:      string,
+	vidar:        string,
 	scripts:      map[string]string,
 	dependencies: map[string]string,
 }
@@ -110,6 +112,7 @@ read_manifest :: proc(path: string) -> (m: Manifest, found: bool, err: errs.Erro
 		description  = doc.root["description"],
 		author       = doc.root["author"],
 		license      = doc.root["license"],
+		vidar        = doc.root["vidar"],
 		scripts      = doc.tables["scripts"],
 		dependencies = doc.tables["dependencies"],
 	}
@@ -124,6 +127,7 @@ write_manifest :: proc(path: string, m: Manifest) -> errs.Error {
 	if m.description != "" do toml.write_pair(&b, "description", m.description)
 	if m.author != "" do toml.write_pair(&b, "author", m.author)
 	if m.license != "" do toml.write_pair(&b, "license", m.license)
+	if m.vidar != "" do toml.write_pair(&b, "vidar", m.vidar)
 	strings.write_byte(&b, '\n')
 	toml.write_header(&b, "scripts")
 	toml.write_table(&b, m.scripts)

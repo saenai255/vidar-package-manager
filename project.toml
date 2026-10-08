@@ -3,6 +3,7 @@ version = "0.1.0"
 description = "Package manager for Vidar"
 author = "Paul Cosma <paul.cosma97@gmail.com>"
 license = "MIT"
+vidar = "2026.10.2"
 
 [scripts]
 build = "vidar build cmd/vpm -o out/src && odin build out/src -out:out/vpm"
