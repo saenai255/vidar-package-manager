@@ -28,11 +28,11 @@ vpm <script> [args...]                    # same, when no vpm command has that n
 vpm clean [--cache]
 ```
 
-Imports are relative, since Vidar only transpiles packages imported by relative path:
+Every installed module is added to `[collections]` in `vidar.toml` under its repository name
+(`repo = "./deps/user/repo"`), so any package in the project imports it the same way:
 
 ```odin
-import "deps/user/repo"          // from the root package
-import "../../deps/user/repo"    // from cmd/app
+import "repo:package"
 ```
 
 ## Example
@@ -43,10 +43,11 @@ the app; all three share one `gadget` v1.0.0.
 
 ## Files
 
-- `project.toml`: name, version, description, author, license, scripts, and `dependencies` mapping a module to a spec.
+- `project.toml`: name, version, description, author, license, `vidar` (minimum Vidar release, checked by `vpm install`), scripts, and `dependencies` mapping a module to a spec.
   A spec is a version range or git ref, optionally after a source URL: `"<url>#<range>"`.
 - `vpm.lock`: every installed module, with its source URL and the resolved version and commit.
   `vpm install` reuses locked commits; `vpm update` re-resolves them.
+- `vidar.toml`: `[collections]` is rewritten on every install, one alias per module.
 - `deps/<user>/<repo>/`: installed sources (the host is left out of the path). Every module is installed
   once, like Go: the newest version that meets every requirement on it. When none does, the version
   `project.toml` asks for wins, with a warning; without one there, `vpm` fails and names the conflict.

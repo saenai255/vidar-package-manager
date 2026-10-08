@@ -14,6 +14,7 @@ init_project :: proc(name: string) -> errs.Error {
 	m := Manifest{
 		name    = name if name != "" else os.base(cwd),
 		version = "0.1.0",
+		vidar   = MIN_VIDAR,
 	}
 	m.scripts["build"] = "vidar build ."
 	m.scripts["run"] = "vidar run ."
@@ -73,7 +74,7 @@ add :: proc(targets: []string) -> errs.Error {
 	}
 	install(root, m, update = updated) or_return
 	for module, i in updated {
-		if !strings.has_suffix(targets[i], "@none") do fmt.printfln("import \"%s/%s\"", MODULES_DIR, install_name(module))
+		if !strings.has_suffix(targets[i], "@none") do fmt.printfln("import \"%s:\"", alias_name(module))
 	}
 	return nil
 }

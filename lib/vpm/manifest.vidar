@@ -10,6 +10,8 @@ import "../toml"
 MANIFEST_FILE :: "project.toml"
 LOCK_FILE :: "vpm.lock"
 MODULES_DIR :: "deps"
+COLLECTIONS_FILE :: "vidar.toml"
+MIN_VIDAR :: "2026.10.2" // first release with vidar.toml collections
 LOCK_VERSION :: 2
 
 Manifest :: struct {
@@ -18,6 +20,7 @@ Manifest :: struct {
 	description:  string,
 	author:       string,
 	license:      string,
+	vidar:        string,
 	scripts:      map[string]string,
 	dependencies: map[string]string,
 }
@@ -109,6 +112,7 @@ read_manifest :: proc(path: string) -> (m: Manifest, found: bool, err: errs.Erro
 		description  = doc.root["description"],
 		author       = doc.root["author"],
 		license      = doc.root["license"],
+		vidar        = doc.root["vidar"],
 		scripts      = doc.tables["scripts"],
 		dependencies = doc.tables["dependencies"],
 	}
@@ -123,6 +127,7 @@ write_manifest :: proc(path: string, m: Manifest) -> errs.Error {
 	if m.description != "" do toml.write_pair(&b, "description", m.description)
 	if m.author != "" do toml.write_pair(&b, "author", m.author)
 	if m.license != "" do toml.write_pair(&b, "license", m.license)
+	if m.vidar != "" do toml.write_pair(&b, "vidar", m.vidar)
 	strings.write_byte(&b, '\n')
 	toml.write_header(&b, "scripts")
 	toml.write_table(&b, m.scripts)
@@ -138,6 +143,27 @@ write_manifest :: proc(path: string, m: Manifest) -> errs.Error {
 save_dependencies :: proc(path: string, deps: map[string]string) -> errs.Error {
 	data := os.read_entire_file(path, context.allocator) catch e { return errs.from_os(e, "read %s", path) }
 	text := toml.set_table(string(data), "dependencies", deps)
+	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
+	return nil
+}
+
+// The repository name alone: "github.com/a/b" is imported as "b:...".
+alias_name :: proc(module: string) -> string {
+	name := install_name(module)
+	if i := strings.last_index_byte(name, '/'); i >= 0 do return name[i + 1:]
+	return name
+}
+
+// Maps each installed module to a vidar collection; the nearest vidar.toml serves every package below it.
+@(private)
+save_collections :: proc(root: string, lock: Lock) -> errs.Error {
+	path := join(root, COLLECTIONS_FILE)
+	existing, _ := os.read_entire_file(path, context.temp_allocator)
+	collections := make(map[string]string, context.temp_allocator)
+	for module in lock.modules {
+		collections[alias_name(module)] = strings.concatenate({"./", MODULES_DIR, "/", install_name(module)}, context.temp_allocator)
+	}
+	text := toml.set_table(string(existing), "collections", collections)
 	os.write_entire_file(path, text) catch e { return errs.from_os(e, "write %s", path) }
 	return nil
 }
